@@ -9,10 +9,10 @@ import torch.utils.data as data
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.utils.tensorboard as tb
+import torch.cuda.amp as amp
 
 import torchvision
 
-import apex
 from tqdm import tqdm
 
 import utils
@@ -24,8 +24,10 @@ def main():
 
     # Training environment configuration
     parser.add_argument('--num_gpus', type=int, default=2, help="Number of GPUs to use")
-    parser.add_argument('--fp16', action='store_true', default=False, help="Mixed precision training (requires NVIDIA apex)")
-    parser.add_argument('--deterministic', action='store_true', default=False, help="Deterministic mode for reproducibility")
+    parser.add_argument('--fp16', action='store_true', default=False,
+                        help="Mixed precision training (requires NVIDIA apex)")
+    parser.add_argument('--deterministic', action='store_true', default=False,
+                        help="Deterministic mode for reproducibility")
     parser.add_argument('--random_seed', type=int, default=7343, help="Random seed (optional)")
     parser.add_argument('--master_addr', type=str, default='localhost', help="Master address for distributed training")
     parser.add_argument('--master_port', type=str, default='7343', help="Master port for distributed training")
@@ -104,14 +106,11 @@ class Trainer:
 
         self.criterion = nn.CrossEntropyLoss()
         self.optimizer = optim.Adam(self.model.parameters(), lr=args.learning_rate)
+        self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.args.gpu])
 
         # Mixed-precision training
         if args.fp16:
-            self.model, self.optimizer = apex.amp.initialize(self.model, self.optimizer, opt_level="O1")
-            self.model = apex.parallel.DistributedDataParallel(self.model)
-
-        else:
-            self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[self.args.gpu])
+            self.scaler = amp.GradScaler()
 
         # TensorBoard
         if args.write_summary and self.is_primary:
@@ -121,7 +120,8 @@ class Trainer:
 
     def train(self, dataset_train, dataset_test):
 
-        sampler_train = data.distributed.DistributedSampler(dataset_train, self.args.num_gpus, self.args.gpu, shuffle=True)
+        sampler_train = data.distributed.DistributedSampler(dataset_train, self.args.num_gpus, self.args.gpu,
+                                                            shuffle=True)
         sampler_test = data.distributed.DistributedSampler(dataset_test, self.args.num_gpus, self.args.gpu)
 
         loader_train = data.DataLoader(dataset_train, self.args.batch_size, sampler=sampler_train)
@@ -167,17 +167,19 @@ class Trainer:
 
             batch_size = labels.size(0)
 
-            logits = self.model(images)
-            loss = self.criterion(logits, labels)
+            with amp.autocast(enabled=self.args.fp16):
+                logits = self.model(images)
+                loss = self.criterion(logits, labels)
 
             if is_train:
                 self.optimizer.zero_grad()
                 if self.args.fp16:
-                    with apex.amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                        scaled_loss.backward()
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                 else:
                     loss.backward()
-                self.optimizer.step()
+                    self.optimizer.step()
 
             correct_samples = self.count_correct(logits, labels.data)
 

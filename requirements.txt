@@ -1,5 +1,4 @@
 torch~=1.7.0+cu101
 torchvision~=0.8.1+cu101
-apex~=0.1
 tqdm~=4.50.2
 numpy~=1.18.5
