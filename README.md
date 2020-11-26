@@ -1,7 +1,6 @@
 # PyTorch Project Template
 
-My favorite way to organize a PyTorch research project. It also offers boilerplate for multi-GPU distributed training, mixed-precision training (requires
-[NVIDIA apex](https://github.com/NVIDIA/apex) API), and Tensorboard.
+My favorite way to organize a PyTorch research project. It also offers boilerplate for multi-GPU distributed training, mixed-precision training, and Tensorboard.
 
 ## Requirements
 
