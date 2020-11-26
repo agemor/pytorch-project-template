@@ -36,6 +36,9 @@ def main():
     parser.add_argument('--num_epochs', type=int, default=20, help="Number of total epochs to train")
     parser.add_argument('--batch_size', type=int, default=128, help="Batch size per GPU/CPU for training")
     parser.add_argument('--learning_rate', type=float, default=5e-5, help="Initial learning rate for optimizer")
+    parser.add_argument('--grad_clip', action='store_true', default=False, help="Gradient clipping")
+    parser.add_argument('--grad_clip_max_norm', type=float, default=1.0, help="Max gradient norm")
+    parser.add_argument('--grad_accum_steps', type=int, default=1, help="Gradient accumulation steps")
 
     # Dataset and trained model (for resume training)
     parser.add_argument('--dataset', type=str, help="Name of the dataset to use")
@@ -171,15 +174,27 @@ class Trainer:
                 logits = self.model(images)
                 loss = self.criterion(logits, labels)
 
+            loss /= self.args.grad_accum_steps
+
             if is_train:
-                self.optimizer.zero_grad()
+                # Calculate grad
                 if self.args.fp16:
                     self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
                 else:
                     loss.backward()
-                    self.optimizer.step()
+
+                if self.args.grad_clip:
+                    if self.args.fp16:
+                        self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip_max_norm)
+
+                if i % self.args.grad_accum_steps == 0:
+                    if self.args.fp16:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
+                    else:
+                        self.optimizer.step()
+                    self.optimizer.zero_grad()
 
             correct_samples = self.count_correct(logits, labels.data)
 
@@ -190,8 +205,9 @@ class Trainer:
             self.global_steps += 1
 
             if is_train and self.is_primary and self.args.write_summary:
-                self.writer.add_scalar('Train/loss', loss.item(), self.global_steps)
-                self.writer.add_scalar('Train/accuracy', correct_samples / batch_size, self.global_steps)
+                if i % self.args.grad_accum_steps == 0:
+                    self.writer.add_scalar('Train/loss', loss.item() * self.args.grad_accum_steps, self.global_steps)
+                    self.writer.add_scalar('Train/accuracy', correct_samples / batch_size, self.global_steps)
 
         return total_loss / total_steps, total_correct_samples / total_samples
 
